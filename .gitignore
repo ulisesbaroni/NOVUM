@@ -1,0 +1,6 @@
+# Secrets - NUNCA subir esto al repo
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
