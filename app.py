@@ -1,29 +1,480 @@
-# app.py
-#
-# NOVUM — punto de entrada de la app Streamlit.
-# "Transformamos lo que pasa en oportunidades de mejora."
-#
-# Toma comentarios informales de empleados y los convierte en sugerencias de
-# mejora estructuradas (texto-a-texto) más un ícono de apoyo generado por IA
-# (texto-a-imagen) para cada sugerencia detectada.
-#
-# Estructura a implementar (Etapa 3, después de cerrar los prompts en la
-# Etapa 2):
-#
-# 1. Config de página (st.set_page_config) + título "NOVUM" + eslogan
-# 2. Sidebar:
-#    - API key de Groq (texto-a-texto) y de OpenAI (texto-a-imagen),
-#      cada una con fallback silencioso a st.secrets (nunca precargada en
-#      el campo visible, para no exponerla en el HTML de una app pública)
-#    - Selector de modelo de texto / parámetros
-# 3. Textarea principal: comentario informal del empleado
-# 4. Botón "Analizar comentario":
-#    - Llamada a Groq (texto-a-texto) con el prompt definido en la Etapa 2
-#      (zero-shot u one-shot, según lo que resulte mejor) + JSON Schema
-#      estricto, incluyendo un campo de concepto visual por sugerencia
-#    - Para cada sugerencia: llamada a OpenAI (texto-a-imagen,
-#      gpt-image-1-mini) usando ese concepto visual, para generar un ícono
-#      de apoyo simple y consistente en estilo
-#    - Manejo de errores de ambas APIs
-#    - Métricas: tiempo, tokens, costo estimado por análisis
-#    - Render de cada sugerencia con su ícono
+"""NOVUM.
+
+App Streamlit que transforma comentarios informales de empleados en
+sugerencias de mejora estructuradas (texto-a-texto, Groq) y genera un
+ícono de apoyo para cada una (texto-a-imagen, OpenAI).
+"""
+
+import base64
+import io
+import json
+import time
+
+import truststore
+
+truststore.inject_into_ssl()
+
+import streamlit as st
+from groq import Groq
+import groq
+from openai import OpenAI
+import openai
+
+SYSTEM_PROMPT = """Actuás como un asistente que ayuda a una empresa a capturar ideas de mejora
+de sus empleados. Vas a recibir un comentario informal, escrito en lenguaje
+natural, que puede referirse a cualquier aspecto del trabajo diario
+(operativo, comedor, uniforme, forma de trabajar, seguridad, etc.).
+
+Tu tarea es extraer la o las sugerencias y devolver, para cada una:
+- categoria: una de ["operativo", "comedor", "uniforme", "forma_de_trabajo", "seguridad", "otro"]
+- descripcion: la mejora propuesta, reformulada de forma clara y concisa
+- beneficio_esperado: qué se ganaría si se implementa
+- prioridad: "alta", "media" o "baja", según el impacto potencial
+- concepto_visual: una frase corta describiendo un ícono simple y plano que
+  represente la idea central de la sugerencia, sin texto dentro de la imagen
+
+Devolvé únicamente un JSON con la clave "sugerencias" y un array de objetos
+con esos cinco campos. Si el comentario menciona varias ideas distintas,
+generá un objeto por cada una. Si no hay ninguna sugerencia real en el
+texto, devolvé un array vacío."""
+
+MODELOS_TEXTO = ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]
+MODELO_IMAGEN = "gpt-image-1-mini"
+TAMANO_IMAGEN = "1024x1024"
+CALIDAD_IMAGEN = "low"
+
+PRIORIDAD_BADGE_COLOR = {
+    "alta": "red",
+    "media": "orange",
+    "baja": "green",
+}
+
+CATEGORIA_ICONO = {
+    "operativo": "⚙️",
+    "comedor": "🍽️",
+    "uniforme": "🦺",
+    "forma_de_trabajo": "🧭",
+    "seguridad": "⚠️",
+    "otro": "✨",
+}
+
+# Precios oficiales publicados por cada proveedor (USD por 1M tokens), usados
+# para cuantificar el costo real de cada análisis con los tokens que
+# devuelve cada respuesta.
+PRECIO_TEXTO = {
+    "openai/gpt-oss-20b": {"entrada": 0.075, "salida": 0.30},
+    "openai/gpt-oss-120b": {"entrada": 0.15, "salida": 0.60},
+}
+PRECIO_IMAGEN = {"texto_entrada": 2.00, "imagen_entrada": 2.50, "salida": 8.00}
+
+MAX_COMPLETION_TOKENS = 1536
+
+# JSON Schema estricto: obliga al modelo a devolver siempre exactamente estos
+# 5 campos por sugerencia.
+RESPONSE_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "sugerencias_mejora",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "sugerencias": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "categoria": {
+                                "type": "string",
+                                "enum": [
+                                    "operativo",
+                                    "comedor",
+                                    "uniforme",
+                                    "forma_de_trabajo",
+                                    "seguridad",
+                                    "otro",
+                                ],
+                            },
+                            "descripcion": {"type": "string"},
+                            "beneficio_esperado": {"type": "string"},
+                            "prioridad": {"type": "string", "enum": ["alta", "media", "baja"]},
+                            "concepto_visual": {"type": "string"},
+                        },
+                        "required": [
+                            "categoria",
+                            "descripcion",
+                            "beneficio_esperado",
+                            "prioridad",
+                            "concepto_visual",
+                        ],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["sugerencias"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+# Estilo visual único de Novum, reutilizado en todos los prompts de imagen
+# para que los íconos sean coherentes entre sí. Regla fija, sin excepciones:
+# ninguna imagen lleva texto incrustado.
+ESTILO_BASE = (
+    "Ilustración digital plana (flat design), fondo blanco, paleta de "
+    "colores suaves (violeta #6D5DF6, gris azulado #5E8A96), sin sombras "
+    "duras, esquinas redondeadas, un solo elemento central, formato "
+    "cuadrado 1:1, sin texto, sin marcas de agua."
+)
+CONCEPTO_REFERENCIA = "un engranaje simple representando mejora continua"
+
+
+def obtener_secreto(nombre):
+    """Lee una key de st.secrets. Si no existe secrets.toml, no rompe."""
+    try:
+        return st.secrets.get(nombre, "")
+    except Exception:
+        return ""
+
+
+def render_sidebar():
+    """Dibuja la configuración de la barra lateral y devuelve sus valores.
+
+    Los campos de key arrancan siempre vacíos: si tuvieran como valor
+    precargado la key de st.secrets, esa key quedaría visible en el HTML de
+    la página para cualquiera que abra la app pública. La key del servidor
+    se usa como fallback silencioso solo si el campo queda vacío.
+    """
+    groq_key_servidor = obtener_secreto("GROQ_API_KEY")
+    openai_key_servidor = obtener_secreto("OPENAI_API_KEY")
+
+    with st.sidebar:
+        st.header("⚙️ Configuración")
+
+        st.caption("Modelo de texto (Groq)")
+        groq_key_ingresada = st.text_input(
+            "Groq API Key",
+            value="",
+            type="password",
+            help="Si hay una key configurada en el servidor se usa automáticamente.",
+        )
+        groq_key = groq_key_ingresada or groq_key_servidor
+        if groq_key_servidor and not groq_key_ingresada:
+            st.caption("✅ Usando la key de Groq del servidor.")
+
+        modelo_texto = st.selectbox("Modelo de texto", MODELOS_TEXTO, index=0)
+        temperatura = st.slider(
+            "Temperatura", min_value=0.0, max_value=1.0, value=0.3, step=0.05
+        )
+
+        st.divider()
+        st.caption("Modelo de imagen (OpenAI)")
+        openai_key_ingresada = st.text_input(
+            "OpenAI API Key",
+            value="",
+            type="password",
+            help="Si hay una key configurada en el servidor se usa automáticamente.",
+        )
+        openai_key = openai_key_ingresada or openai_key_servidor
+        if openai_key_servidor and not openai_key_ingresada:
+            st.caption("✅ Usando la key de OpenAI del servidor.")
+
+        generar_iconos = st.checkbox(
+            "Generar íconos con IA",
+            value=True,
+            help="Tiene un costo adicional por imagen. Desactivalo para probar solo el análisis de texto.",
+        )
+        tecnica_imagen = st.radio(
+            "Técnica de prompting para los íconos",
+            ["One-shot (con imagen de referencia)", "Zero-shot (sin referencia)"],
+            help="Comparación de las dos técnicas de fast prompting aplicadas al modelo de imagen.",
+            disabled=not generar_iconos,
+        )
+
+    return {
+        "groq_key": groq_key,
+        "modelo_texto": modelo_texto,
+        "temperatura": temperatura,
+        "openai_key": openai_key,
+        "generar_iconos": generar_iconos,
+        "one_shot": tecnica_imagen.startswith("One-shot"),
+    }
+
+
+def analizar_comentario(groq_key, modelo, temperatura, comentario):
+    """Llama a la API de Groq (texto-a-texto, zero-shot + JSON Schema estricto).
+
+    Devuelve (respuesta, tiempo_respuesta, error).
+    """
+    client = Groq(api_key=groq_key, timeout=30.0)
+    inicio = time.time()
+    try:
+        respuesta = client.chat.completions.create(
+            model=modelo,
+            temperature=temperatura,
+            max_completion_tokens=MAX_COMPLETION_TOKENS,
+            response_format=RESPONSE_SCHEMA,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": comentario},
+            ],
+        )
+    except groq.AuthenticationError:
+        return None, None, "La API key de Groq no es válida. Revisala en la barra lateral."
+    except groq.RateLimitError:
+        return None, None, "Se alcanzó el límite de uso de la API de Groq. Probá de nuevo en unos minutos."
+    except groq.APITimeoutError:
+        return None, None, "La API de Groq tardó demasiado en responder. Probá de nuevo."
+    except groq.APIConnectionError:
+        return None, None, "No se pudo conectar con la API de Groq. Revisá tu conexión e intentá de nuevo."
+    except groq.APIStatusError as e:
+        return None, None, f"La API de Groq devolvió un error ({e.status_code}). Intentá de nuevo más tarde."
+    except groq.APIError as e:
+        return None, None, f"Ocurrió un error inesperado al llamar a la API de Groq: {e}"
+
+    return respuesta, time.time() - inicio, None
+
+
+def parsear_sugerencias(respuesta):
+    """Parsea el JSON de la respuesta. Devuelve (datos, sugerencias, contenido_invalido)."""
+    contenido = respuesta.choices[0].message.content
+    try:
+        datos = json.loads(contenido)
+    except json.JSONDecodeError:
+        return None, None, contenido
+    return datos, datos.get("sugerencias", []), None
+
+
+def calcular_costo_texto(modelo, respuesta):
+    precio = PRECIO_TEXTO.get(modelo)
+    if precio is None:
+        return None
+    return (
+        respuesta.usage.prompt_tokens * precio["entrada"]
+        + respuesta.usage.completion_tokens * precio["salida"]
+    ) / 1_000_000
+
+
+def calcular_costo_imagen(usage):
+    if usage is None:
+        return None
+    detalles = getattr(usage, "input_tokens_details", None)
+    texto_in = getattr(detalles, "text_tokens", usage.input_tokens) if detalles else usage.input_tokens
+    imagen_in = getattr(detalles, "image_tokens", 0) if detalles else 0
+    return (
+        texto_in * PRECIO_IMAGEN["texto_entrada"]
+        + imagen_in * PRECIO_IMAGEN["imagen_entrada"]
+        + usage.output_tokens * PRECIO_IMAGEN["salida"]
+    ) / 1_000_000
+
+
+def _manejar_error_openai(e):
+    if isinstance(e, openai.AuthenticationError):
+        return "La API key de OpenAI no es válida. Revisala en la barra lateral."
+    if isinstance(e, openai.RateLimitError):
+        return "Se alcanzó el límite de uso de la API de OpenAI. Probá de nuevo en unos minutos."
+    if isinstance(e, openai.APITimeoutError):
+        return "La API de OpenAI tardó demasiado en responder. Probá de nuevo."
+    if isinstance(e, openai.APIConnectionError):
+        return "No se pudo conectar con la API de OpenAI. Revisá tu conexión e intentá de nuevo."
+    if isinstance(e, openai.APIStatusError):
+        return f"La API de OpenAI devolvió un error ({e.status_code}). Intentá de nuevo más tarde."
+    return f"Ocurrió un error inesperado al generar la imagen: {e}"
+
+
+def generar_imagen_zero_shot(client, concepto_visual):
+    """Genera un ícono desde cero, solo con una descripción de texto.
+
+    Devuelve (imagen_bytes, tiempo, costo, error).
+    """
+    prompt = f"{ESTILO_BASE} Ícono que represente: {concepto_visual}."
+    inicio = time.time()
+    try:
+        resultado = client.images.generate(
+            model=MODELO_IMAGEN, prompt=prompt, size=TAMANO_IMAGEN, quality=CALIDAD_IMAGEN
+        )
+    except openai.OpenAIError as e:
+        return None, None, None, _manejar_error_openai(e)
+
+    tiempo = time.time() - inicio
+    imagen_bytes = base64.b64decode(resultado.data[0].b64_json)
+    costo = calcular_costo_imagen(getattr(resultado, "usage", None))
+    return imagen_bytes, tiempo, costo, None
+
+
+def generar_imagen_one_shot(client, concepto_visual, imagen_referencia):
+    """Genera un ícono nuevo imitando el estilo de una imagen de referencia.
+
+    Devuelve (imagen_bytes, tiempo, costo, error).
+    """
+    prompt = (
+        "Generá un nuevo ícono que mantenga exactamente el mismo estilo "
+        "visual, la misma paleta de colores y la misma composición que la "
+        f"imagen de referencia, pero que represente en cambio: "
+        f"{concepto_visual}. Sin texto en la imagen."
+    )
+    referencia = io.BytesIO(imagen_referencia)
+    referencia.name = "referencia.png"
+
+    inicio = time.time()
+    try:
+        resultado = client.images.edit(
+            model=MODELO_IMAGEN, image=referencia, prompt=prompt, size=TAMANO_IMAGEN
+        )
+    except openai.OpenAIError as e:
+        return None, None, None, _manejar_error_openai(e)
+
+    tiempo = time.time() - inicio
+    imagen_bytes = base64.b64decode(resultado.data[0].b64_json)
+    costo = calcular_costo_imagen(getattr(resultado, "usage", None))
+    return imagen_bytes, tiempo, costo, None
+
+
+def obtener_imagen_referencia(client):
+    """Genera la imagen semilla del one-shot una sola vez por sesión.
+
+    Se cachea en st.session_state para no volver a pagarla en cada
+    sugerencia ni en cada re-render de la página.
+    """
+    if "novum_imagen_referencia" not in st.session_state:
+        imagen_bytes, _, costo, error = generar_imagen_zero_shot(client, CONCEPTO_REFERENCIA)
+        if error:
+            return None, None, error
+        st.session_state["novum_imagen_referencia"] = imagen_bytes
+        st.session_state["novum_costo_referencia"] = costo
+
+    return (
+        st.session_state["novum_imagen_referencia"],
+        st.session_state.get("novum_costo_referencia"),
+        None,
+    )
+
+
+def render_metricas_texto(tiempo_respuesta, respuesta, costo):
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("⏱️ Tiempo", f"{tiempo_respuesta:.2f} s")
+    col2.metric("📥 Tokens entrada", respuesta.usage.prompt_tokens)
+    col3.metric("📤 Tokens salida", respuesta.usage.completion_tokens)
+    col4.metric("💰 Costo texto", f"US$ {costo:.5f}" if costo is not None else "—")
+
+
+def render_sugerencias(sugerencias, cliente_imagen, generar_iconos, one_shot):
+    if not sugerencias:
+        st.info("No se detectó ninguna sugerencia concreta en el comentario.")
+        return 0.0
+
+    costo_imagenes = 0.0
+    imagen_referencia = None
+    if generar_iconos and one_shot and cliente_imagen is not None:
+        imagen_referencia, costo_ref, error_ref = obtener_imagen_referencia(cliente_imagen)
+        if error_ref:
+            st.warning(f"No se pudo generar la imagen de referencia: {error_ref}")
+        elif costo_ref is not None and "novum_costo_referencia_sumado" not in st.session_state:
+            costo_imagenes += costo_ref
+            st.session_state["novum_costo_referencia_sumado"] = True
+
+    st.subheader(f"Sugerencias detectadas ({len(sugerencias)})")
+    for s in sugerencias:
+        prioridad = s.get("prioridad", "media")
+        categoria = s.get("categoria", "otro")
+        color = PRIORIDAD_BADGE_COLOR.get(prioridad, "gray")
+        icono = CATEGORIA_ICONO.get(categoria, "✨")
+
+        with st.container(border=True):
+            col_texto, col_imagen = st.columns([3, 1])
+            with col_texto:
+                st.markdown(
+                    f":{color}-badge[Prioridad {prioridad}] "
+                    f":gray-badge[{icono} {categoria.replace('_', ' ')}]"
+                )
+                st.markdown(f"**{s.get('descripcion', '')}**")
+                st.caption(f"💡 Beneficio esperado: {s.get('beneficio_esperado', '')}")
+
+            with col_imagen:
+                if generar_iconos and cliente_imagen is not None:
+                    concepto = s.get("concepto_visual", categoria)
+                    with st.spinner("Generando ícono..."):
+                        if one_shot and imagen_referencia is not None:
+                            img, tiempo_img, costo_img, error_img = generar_imagen_one_shot(
+                                cliente_imagen, concepto, imagen_referencia
+                            )
+                        else:
+                            img, tiempo_img, costo_img, error_img = generar_imagen_zero_shot(
+                                cliente_imagen, concepto
+                            )
+                    if error_img:
+                        st.warning(error_img)
+                    else:
+                        st.image(img, use_container_width=True)
+                        if costo_img is not None:
+                            costo_imagenes += costo_img
+                            st.caption(f"💰 US$ {costo_img:.5f} · ⏱️ {tiempo_img:.1f}s")
+
+    return costo_imagenes
+
+
+def main():
+    st.set_page_config(page_title="NOVUM", page_icon="🔮", layout="centered")
+    st.title("🔮 NOVUM")
+    st.caption("Transformamos lo que pasa en oportunidades de mejora.")
+
+    config = render_sidebar()
+
+    comentario = st.text_area(
+        "Comentario del empleado",
+        height=150,
+        placeholder=(
+            "Ej: che, estaría bueno que el recorrido de picking del sector B "
+            "no cruce por donde cargan los pallets, casi nos chocamos hoy..."
+        ),
+    )
+
+    if not st.button("🔎 Analizar comentario", type="primary"):
+        return
+
+    if not config["groq_key"]:
+        st.error("Falta la API key de Groq. Cargala en la barra lateral.")
+        return
+    if config["generar_iconos"] and not config["openai_key"]:
+        st.error("Falta la API key de OpenAI, o desactivá 'Generar íconos con IA'.")
+        return
+    if not comentario.strip():
+        st.warning("Escribí un comentario antes de analizar.")
+        return
+
+    with st.spinner("Analizando comentario..."):
+        respuesta, tiempo_respuesta, error = analizar_comentario(
+            config["groq_key"], config["modelo_texto"], config["temperatura"], comentario
+        )
+
+    if error:
+        st.error(error)
+        return
+
+    datos, sugerencias, contenido_invalido = parsear_sugerencias(respuesta)
+    if contenido_invalido is not None:
+        st.error("El modelo no devolvió un JSON válido. Probá de nuevo o cambiá el modelo.")
+        with st.expander("Ver respuesta cruda"):
+            st.code(contenido_invalido)
+        return
+
+    costo_texto = calcular_costo_texto(config["modelo_texto"], respuesta)
+    render_metricas_texto(tiempo_respuesta, respuesta, costo_texto)
+    st.divider()
+
+    cliente_imagen = OpenAI(api_key=config["openai_key"], timeout=60.0) if config["generar_iconos"] else None
+    costo_imagenes = render_sugerencias(
+        sugerencias, cliente_imagen, config["generar_iconos"], config["one_shot"]
+    )
+
+    if config["generar_iconos"]:
+        st.divider()
+        costo_total = (costo_texto or 0) + costo_imagenes
+        st.metric("💰 Costo total de este análisis", f"US$ {costo_total:.5f}")
+
+    with st.expander("Ver JSON crudo"):
+        st.json(datos)
+
+
+if __name__ == "__main__":
+    main()
