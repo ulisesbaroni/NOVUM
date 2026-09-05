@@ -25,16 +25,23 @@ de sus empleados. Vas a recibir un comentario informal, escrito en lenguaje
 natural, que puede referirse a cualquier aspecto del trabajo diario
 (operativo, comedor, uniforme, forma de trabajar, seguridad, etc.).
 
+Respondé siempre en español rioplatense, sin importar en qué idioma esté
+escrito el comentario de entrada.
+
 Tu tarea es extraer la o las sugerencias y devolver, para cada una:
 - categoria: una de ["operativo", "comedor", "uniforme", "forma_de_trabajo", "seguridad", "otro"]
 - descripcion: la mejora propuesta, reformulada de forma clara y concisa
 - beneficio_esperado: qué se ganaría si se implementa
 - prioridad: "alta", "media" o "baja", según el impacto potencial
+- area_responsable: el área de la empresa que debería hacerse cargo de
+  evaluar o implementar la mejora, una de ["operaciones_logistica",
+  "mantenimiento", "rrhh", "seguridad_e_higiene", "compras_abastecimiento",
+  "sistemas_it", "direccion_gerencia", "otro"]
 - concepto_visual: una frase corta describiendo un ícono simple y plano que
   represente la idea central de la sugerencia, sin texto dentro de la imagen
 
 Devolvé únicamente un JSON con la clave "sugerencias" y un array de objetos
-con esos cinco campos. Si el comentario menciona varias ideas distintas,
+con esos seis campos. Si el comentario menciona varias ideas distintas,
 generá un objeto por cada una. Si no hay ninguna sugerencia real en el
 texto, devolvé un array vacío."""
 
@@ -58,6 +65,17 @@ CATEGORIA_ICONO = {
     "otro": "✨",
 }
 
+AREA_ICONO = {
+    "operaciones_logistica": "📦",
+    "mantenimiento": "🔧",
+    "rrhh": "🧑‍💼",
+    "seguridad_e_higiene": "🛟",
+    "compras_abastecimiento": "🛒",
+    "sistemas_it": "💻",
+    "direccion_gerencia": "🏢",
+    "otro": "✨",
+}
+
 # Precios oficiales publicados por cada proveedor (USD por 1M tokens), usados
 # para cuantificar el costo real de cada análisis con los tokens que
 # devuelve cada respuesta.
@@ -70,7 +88,7 @@ PRECIO_IMAGEN = {"texto_entrada": 2.00, "imagen_entrada": 2.50, "salida": 8.00}
 MAX_COMPLETION_TOKENS = 1536
 
 # JSON Schema estricto: obliga al modelo a devolver siempre exactamente estos
-# 5 campos por sugerencia.
+# 6 campos por sugerencia.
 RESPONSE_SCHEMA = {
     "type": "json_schema",
     "json_schema": {
@@ -98,6 +116,19 @@ RESPONSE_SCHEMA = {
                             "descripcion": {"type": "string"},
                             "beneficio_esperado": {"type": "string"},
                             "prioridad": {"type": "string", "enum": ["alta", "media", "baja"]},
+                            "area_responsable": {
+                                "type": "string",
+                                "enum": [
+                                    "operaciones_logistica",
+                                    "mantenimiento",
+                                    "rrhh",
+                                    "seguridad_e_higiene",
+                                    "compras_abastecimiento",
+                                    "sistemas_it",
+                                    "direccion_gerencia",
+                                    "otro",
+                                ],
+                            },
                             "concepto_visual": {"type": "string"},
                         },
                         "required": [
@@ -105,6 +136,7 @@ RESPONSE_SCHEMA = {
                             "descripcion",
                             "beneficio_esperado",
                             "prioridad",
+                            "area_responsable",
                             "concepto_visual",
                         ],
                         "additionalProperties": False,
@@ -377,18 +409,21 @@ def render_sugerencias(sugerencias, cliente_imagen, generar_iconos, one_shot):
     for s in sugerencias:
         prioridad = s.get("prioridad", "media")
         categoria = s.get("categoria", "otro")
+        area = s.get("area_responsable", "otro")
         color = PRIORIDAD_BADGE_COLOR.get(prioridad, "gray")
-        icono = CATEGORIA_ICONO.get(categoria, "✨")
+        icono_categoria = CATEGORIA_ICONO.get(categoria, "✨")
+        icono_area = AREA_ICONO.get(area, "✨")
 
         with st.container(border=True):
             col_texto, col_imagen = st.columns([3, 1])
             with col_texto:
                 st.markdown(
                     f":{color}-badge[Prioridad {prioridad}] "
-                    f":gray-badge[{icono} {categoria.replace('_', ' ')}]"
+                    f":gray-badge[{icono_categoria} {categoria.replace('_', ' ')}]"
                 )
                 st.markdown(f"**{s.get('descripcion', '')}**")
                 st.caption(f"💡 Beneficio esperado: {s.get('beneficio_esperado', '')}")
+                st.caption(f"{icono_area} Área responsable: {area.replace('_', ' ')}")
 
             with col_imagen:
                 if generar_iconos and cliente_imagen is not None:
@@ -421,7 +456,7 @@ def main():
     config = render_sidebar()
 
     comentario = st.text_area(
-        "Comentario del empleado",
+        "¿Qué está ocurriendo?",
         height=150,
         placeholder=(
             "Ej: che, estaría bueno que el recorrido de picking del sector B "
