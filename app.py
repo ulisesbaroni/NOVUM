@@ -96,7 +96,7 @@ PRECIO_TEXTO = {
 }
 PRECIO_IMAGEN = {"texto_entrada": 2.00, "imagen_entrada": 2.50, "salida": 8.00}
 
-MAX_COMPLETION_TOKENS = 1536
+MAX_COMPLETION_TOKENS = 2560
 
 # JSON Schema estricto: obliga al modelo a devolver siempre exactamente estos
 # 6 campos por sugerencia.
@@ -403,7 +403,11 @@ def generar_imagen_one_shot(client, concepto_visual, imagen_referencia):
     inicio = time.time()
     try:
         resultado = client.images.edit(
-            model=MODELO_IMAGEN, image=referencia, prompt=prompt, size=TAMANO_IMAGEN
+            model=MODELO_IMAGEN,
+            image=referencia,
+            prompt=prompt,
+            size=TAMANO_IMAGEN,
+            quality=CALIDAD_IMAGEN,
         )
     except openai.OpenAIError as e:
         return None, None, None, _manejar_error_openai(e)
