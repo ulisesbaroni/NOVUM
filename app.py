@@ -265,8 +265,8 @@ def render_sidebar():
 
         generar_iconos = st.checkbox(
             "Generar íconos con IA",
-            value=True,
-            help="Tiene un costo adicional por imagen. Desactivalo para probar solo el análisis de texto.",
+            value=False,
+            help="Tiene un costo adicional por imagen. Activalo para generar un ícono de apoyo por sugerencia.",
         )
         tecnica_imagen = st.radio(
             "Técnica de prompting para los íconos",
