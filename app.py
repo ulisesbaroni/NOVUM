@@ -76,6 +76,17 @@ AREA_ICONO = {
     "otro": "✨",
 }
 
+AREA_NOMBRE = {
+    "operaciones_logistica": "Operaciones y Logística",
+    "mantenimiento": "Mantenimiento",
+    "rrhh": "Recursos Humanos",
+    "seguridad_e_higiene": "Seguridad e Higiene",
+    "compras_abastecimiento": "Compras y Abastecimiento",
+    "sistemas_it": "Sistemas / IT",
+    "direccion_gerencia": "Dirección / Gerencia",
+    "otro": "el área correspondiente",
+}
+
 # Precios oficiales publicados por cada proveedor (USD por 1M tokens), usados
 # para cuantificar el costo real de cada análisis con los tokens que
 # devuelve cada respuesta.
@@ -159,6 +170,47 @@ ESTILO_BASE = (
     "cuadrado 1:1, sin texto, sin marcas de agua."
 )
 CONCEPTO_REFERENCIA = "un engranaje simple representando mejora continua"
+
+FONDO_PATH = "assets/banner.jpg"
+COLOR_TITULO = "#7A4A00"
+
+
+@st.cache_data
+def _imagen_como_data_uri(ruta):
+    with open(ruta, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+    return f"data:image/jpeg;base64,{b64}"
+
+
+def render_fondo():
+    """Imagen de fondo fija, a pantalla completa, solo en el área principal
+    (no en la sidebar). Se llama una vez al inicio de main(), así queda
+    presente en todas las vistas (login, formulario, resultados, gracias)."""
+    fondo = _imagen_como_data_uri(FONDO_PATH)
+    st.markdown(
+        f"""
+        <style>
+        [data-testid="stMain"] {{
+            background-color: #FFDC00;
+            background-image: url("{fondo}");
+            background-size: contain;
+            background-repeat: no-repeat;
+            background-position: center;
+            background-attachment: fixed;
+        }}
+        [class*="st-key-novum_sugerencia_"] {{
+            background: rgba(255, 255, 255, 0.65);
+            border-radius: 12px;
+        }}
+        .st-key-novum_gracias_texto {{
+            background: rgba(255, 255, 255, 0.65);
+            border-radius: 16px;
+            padding: 1.5rem 2rem;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def obtener_secreto(nombre):
@@ -382,31 +434,67 @@ def obtener_imagen_referencia(client):
     )
 
 
-def render_metricas_texto(tiempo_respuesta, respuesta, costo):
+def render_metricas_texto(tiempo_respuesta, tokens_entrada, tokens_salida, costo):
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("⏱️ Tiempo", f"{tiempo_respuesta:.2f} s")
-    col2.metric("📥 Tokens entrada", respuesta.usage.prompt_tokens)
-    col3.metric("📤 Tokens salida", respuesta.usage.completion_tokens)
+    col2.metric("📥 Tokens entrada", tokens_entrada)
+    col3.metric("📤 Tokens salida", tokens_salida)
     col4.metric("💰 Costo texto", f"US$ {costo:.5f}" if costo is not None else "—")
 
 
-def render_sugerencias(sugerencias, cliente_imagen, generar_iconos, one_shot):
-    if not sugerencias:
-        st.info("No se detectó ninguna sugerencia concreta en el comentario.")
-        return 0.0
+def generar_iconos_para_sugerencias(sugerencias, cliente_imagen, one_shot):
+    """Genera el ícono de cada sugerencia UNA sola vez y lo adjunta al dict.
 
-    costo_imagenes = 0.0
+    Se llama solo en el momento del análisis (no en cada re-render), porque
+    Streamlit vuelve a ejecutar todo el script ante cualquier interacción
+    (por ejemplo, tocar "Enviar" o "Descartar"): sin este cacheo, cada click
+    volvería a facturar la generación de todas las imágenes de nuevo.
+
+    Devuelve (sugerencias_con_icono, costo_total_imagenes).
+    """
+    costo_total = 0.0
     imagen_referencia = None
-    if generar_iconos and one_shot and cliente_imagen is not None:
+    if one_shot:
         imagen_referencia, costo_ref, error_ref = obtener_imagen_referencia(cliente_imagen)
         if error_ref:
             st.warning(f"No se pudo generar la imagen de referencia: {error_ref}")
         elif costo_ref is not None and "novum_costo_referencia_sumado" not in st.session_state:
-            costo_imagenes += costo_ref
+            costo_total += costo_ref
             st.session_state["novum_costo_referencia_sumado"] = True
 
-    st.subheader(f"Sugerencias detectadas ({len(sugerencias)})")
+    sugerencias_con_icono = []
     for s in sugerencias:
+        s = dict(s)
+        concepto = s.get("concepto_visual", s.get("categoria", "otro"))
+        with st.spinner("Generando ícono..."):
+            if one_shot and imagen_referencia is not None:
+                img, tiempo_img, costo_img, error_img = generar_imagen_one_shot(
+                    cliente_imagen, concepto, imagen_referencia
+                )
+            else:
+                img, tiempo_img, costo_img, error_img = generar_imagen_zero_shot(
+                    cliente_imagen, concepto
+                )
+        s["icono_bytes"] = img
+        s["icono_tiempo"] = tiempo_img
+        s["icono_costo"] = costo_img
+        s["icono_error"] = error_img
+        if costo_img is not None:
+            costo_total += costo_img
+        sugerencias_con_icono.append(s)
+
+    return sugerencias_con_icono, costo_total
+
+
+def render_sugerencias(sugerencias, generar_iconos):
+    """Muestra las sugerencias ya analizadas. No llama a ninguna API: los
+    íconos, si corresponde, ya vienen generados de antemano."""
+    if not sugerencias:
+        st.info("No se detectó ninguna sugerencia concreta en el comentario.")
+        return
+
+    st.subheader(f"Sugerencias detectadas ({len(sugerencias)})")
+    for i, s in enumerate(sugerencias):
         prioridad = s.get("prioridad", "media")
         categoria = s.get("categoria", "otro")
         area = s.get("area_responsable", "otro")
@@ -414,7 +502,7 @@ def render_sugerencias(sugerencias, cliente_imagen, generar_iconos, one_shot):
         icono_categoria = CATEGORIA_ICONO.get(categoria, "✨")
         icono_area = AREA_ICONO.get(area, "✨")
 
-        with st.container(border=True):
+        with st.container(border=True, key=f"novum_sugerencia_{i}"):
             col_texto, col_imagen = st.columns([3, 1])
             with col_texto:
                 st.markdown(
@@ -426,89 +514,266 @@ def render_sugerencias(sugerencias, cliente_imagen, generar_iconos, one_shot):
                 st.caption(f"{icono_area} Área responsable: {area.replace('_', ' ')}")
 
             with col_imagen:
-                if generar_iconos and cliente_imagen is not None:
-                    concepto = s.get("concepto_visual", categoria)
-                    with st.spinner("Generando ícono..."):
-                        if one_shot and imagen_referencia is not None:
-                            img, tiempo_img, costo_img, error_img = generar_imagen_one_shot(
-                                cliente_imagen, concepto, imagen_referencia
-                            )
-                        else:
-                            img, tiempo_img, costo_img, error_img = generar_imagen_zero_shot(
-                                cliente_imagen, concepto
-                            )
-                    if error_img:
-                        st.warning(error_img)
-                    else:
-                        st.image(img, use_container_width=True)
-                        if costo_img is not None:
-                            costo_imagenes += costo_img
-                            st.caption(f"💰 US$ {costo_img:.5f} · ⏱️ {tiempo_img:.1f}s")
+                if generar_iconos:
+                    if s.get("icono_error"):
+                        st.warning(s["icono_error"])
+                    elif s.get("icono_bytes") is not None:
+                        st.image(s["icono_bytes"], use_container_width=True)
+                        if s.get("icono_costo") is not None:
+                            st.caption(f"💰 US$ {s['icono_costo']:.5f} · ⏱️ {s['icono_tiempo']:.1f}s")
 
-    return costo_imagenes
+
+def _texto_areas_involucradas(sugerencias):
+    """Arma la frase 'el equipo de X' / 'los equipos de X, Y y Z'."""
+    areas = []
+    for s in sugerencias:
+        nombre = AREA_NOMBRE.get(s.get("area_responsable"), "el área correspondiente")
+        if nombre not in areas:
+            areas.append(nombre)
+
+    if not areas:
+        return "el equipo correspondiente"
+    if len(areas) == 1:
+        return f"el equipo de {areas[0]}"
+    return "los equipos de " + ", ".join(areas[:-1]) + f" y {areas[-1]}"
+
+
+def render_gracias():
+    """Pantalla de agradecimiento tras enviar un comentario."""
+    st.markdown(
+        """
+        <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&display=swap" rel="stylesheet">
+        <style>
+        @keyframes novum-vuelo {
+            0%   { transform: translate(-50%, 60px) rotate(-10deg); opacity: 0; }
+            25%  { opacity: 1; }
+            100% { transform: translate(-50%, -140px) rotate(12deg); opacity: 0; }
+        }
+        .novum-avion {
+            position: relative;
+            left: 50%;
+            width: fit-content;
+            font-size: 3rem;
+            animation: novum-vuelo 1.8s ease-out forwards;
+        }
+        .novum-gracias-titulo {
+            font-family: 'Poppins', sans-serif;
+            font-weight: 600;
+            font-size: 1.5rem;
+            color: #7A4A00;
+            text-align: center;
+            margin-bottom: 0.5rem;
+        }
+        .novum-gracias-texto {
+            font-family: 'Poppins', sans-serif;
+            font-weight: 400;
+            font-size: 1rem;
+            color: #1F2937;
+            text-align: center;
+            margin: 0.2rem 0;
+        }
+        </style>
+        <div class="novum-avion">✈️</div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.balloons()
+
+    texto_areas = _texto_areas_involucradas(st.session_state.get("novum_ultimas_sugerencias", []))
+
+    with st.container(key="novum_gracias_texto"):
+        st.markdown(
+            f"""
+            <p class="novum-gracias-titulo">¡Gracias por compartir tu experiencia! 🚀</p>
+            <p class="novum-gracias-texto">Cada aporte suma a una mejor experiencia de trabajo para todos. ⭐</p>
+            <p class="novum-gracias-texto">Tu aporte ya forma parte de NOVUM y será analizado por {texto_areas}.</p>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    col_izq, col_centro, col_der = st.columns([1, 2, 1])
+    with col_centro:
+        if st.button("✍️ Escribir un nuevo comentario", type="primary", use_container_width=True):
+            st.session_state["novum_vista"] = "formulario"
+            st.session_state.pop("novum_ultimas_sugerencias", None)
+            st.rerun()
+
+
+def render_titulo_novum():
+    """Encabezado de marca (🔮 NOVUM + eslogan), reutilizado en cada vista."""
+    st.markdown(
+        f"""
+        <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&display=swap" rel="stylesheet">
+        <p style="font-family:'Poppins', sans-serif; font-weight:600;
+                  font-size:2rem; color:{COLOR_TITULO}; margin-bottom:0;">
+            🔮 NOVUM
+        </p>
+        <p style="font-family:'Poppins', sans-serif; font-size:0.95rem;
+                  color:{COLOR_TITULO}; opacity:0.85; margin-top:0.1rem;">
+            Transformamos lo que pasa en oportunidades de mejora.
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_login():
+    """Pantalla de ingreso.
+
+    El login con legajo y DNI queda preparado para una futura etapa (donde
+    se sume una base de datos para hacer seguimiento del estado de cada
+    sugerencia: leída, aceptada, en proceso). Por ahora no hay backend que
+    valide esos datos, así que el único camino habilitado es "anónimo".
+    """
+    render_titulo_novum()
+
+    st.subheader("Ingresar")
+    with st.form("form_login"):
+        st.text_input("Legajo")
+        st.text_input("DNI")
+        intento_login = st.form_submit_button("Ingresar")
+
+    if intento_login:
+        st.info(
+            "El ingreso con legajo y DNI todavía no está disponible en esta "
+            "versión. Por ahora, usá 'Ingresar como anónimo' para continuar."
+        )
+
+    st.divider()
+    if st.button("Ingresar como anónimo"):
+        st.session_state["novum_autenticado"] = True
+        st.session_state["novum_usuario"] = "anonimo"
+        st.rerun()
+
+
+def render_app():
+    config = render_sidebar()
+
+    if st.session_state.get("novum_vista") == "gracias":
+        render_gracias()
+        return
+
+    render_titulo_novum()
+
+    st.markdown(
+        f"""
+        <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&display=swap" rel="stylesheet">
+        <p style="font-family:'Poppins', sans-serif; font-weight:500;
+                  font-size:1.05rem; color:{COLOR_TITULO}; margin-bottom:0.1rem;">
+            Tu experiencia puede ayudarnos a mejorar. ¿Qué querés compartir hoy?
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Puede ser una idea, una observación, una dificultad, un riesgo o "
+        "una oportunidad de mejora."
+    )
+    comentario = st.text_area(
+        "Comentario",
+        label_visibility="collapsed",
+        height=150,
+        placeholder=(
+            "Ej: En horas pico se genera mucho tránsito en el mismo pasillo "
+            "que están trabajando los chicos de limpieza."
+        ),
+    )
+
+    if st.button("🔎 Analizar comentario", type="primary"):
+        if not config["groq_key"]:
+            st.error("Falta la API key de Groq. Cargala en la barra lateral.")
+        elif config["generar_iconos"] and not config["openai_key"]:
+            st.error("Falta la API key de OpenAI, o desactivá 'Generar íconos con IA'.")
+        elif not comentario.strip():
+            st.warning("Escribí un comentario antes de analizar.")
+        else:
+            with st.spinner("Analizando comentario..."):
+                respuesta, tiempo_respuesta, error = analizar_comentario(
+                    config["groq_key"], config["modelo_texto"], config["temperatura"], comentario
+                )
+
+            if error:
+                st.error(error)
+            else:
+                datos, sugerencias, contenido_invalido = parsear_sugerencias(respuesta)
+                if contenido_invalido is not None:
+                    st.error("El modelo no devolvió un JSON válido. Probá de nuevo o cambiá el modelo.")
+                    with st.expander("Ver respuesta cruda"):
+                        st.code(contenido_invalido)
+                else:
+                    costo_texto = calcular_costo_texto(config["modelo_texto"], respuesta)
+                    costo_imagenes = 0.0
+                    if config["generar_iconos"] and sugerencias:
+                        cliente_imagen = OpenAI(api_key=config["openai_key"], timeout=60.0)
+                        sugerencias, costo_imagenes = generar_iconos_para_sugerencias(
+                            sugerencias, cliente_imagen, config["one_shot"]
+                        )
+
+                    st.session_state["novum_resultado"] = {
+                        "datos": datos,
+                        "sugerencias": sugerencias,
+                        "costo_texto": costo_texto,
+                        "costo_imagenes": costo_imagenes,
+                        "tiempo_respuesta": tiempo_respuesta,
+                        "tokens_entrada": respuesta.usage.prompt_tokens,
+                        "tokens_salida": respuesta.usage.completion_tokens,
+                        "generar_iconos": config["generar_iconos"],
+                    }
+                    st.rerun()
+
+    resultado = st.session_state.get("novum_resultado")
+    if not resultado:
+        return
+
+    st.divider()
+    render_metricas_texto(
+        resultado["tiempo_respuesta"],
+        resultado["tokens_entrada"],
+        resultado["tokens_salida"],
+        resultado["costo_texto"],
+    )
+    st.divider()
+
+    render_sugerencias(resultado["sugerencias"], resultado["generar_iconos"])
+
+    if resultado["generar_iconos"]:
+        st.divider()
+        costo_total = (resultado["costo_texto"] or 0) + resultado["costo_imagenes"]
+        st.metric("💰 Costo total de este análisis", f"US$ {costo_total:.5f}")
+
+    with st.expander("Ver JSON crudo"):
+        st.json(resultado["datos"])
+
+    st.divider()
+    col_enviar, col_descartar = st.columns(2)
+    with col_enviar:
+        if st.button("📨 Enviar comentario", type="primary", use_container_width=True):
+            st.session_state["novum_ultimas_sugerencias"] = resultado["sugerencias"]
+            st.session_state["novum_vista"] = "gracias"
+            st.session_state.pop("novum_resultado", None)
+            st.rerun()
+    with col_descartar:
+        if st.button("🗑️ Descartar comentario", use_container_width=True):
+            st.session_state.pop("novum_resultado", None)
+            st.rerun()
 
 
 def main():
     st.set_page_config(page_title="NOVUM", page_icon="🔮", layout="centered")
-    st.title("🔮 NOVUM")
-    st.caption("Transformamos lo que pasa en oportunidades de mejora.")
+    render_fondo()
 
-    config = render_sidebar()
-
-    comentario = st.text_area(
-        "¿Qué está ocurriendo?",
-        height=150,
-        placeholder=(
-            "Ej: che, estaría bueno que el recorrido de picking del sector B "
-            "no cruce por donde cargan los pallets, casi nos chocamos hoy..."
-        ),
-    )
-
-    if not st.button("🔎 Analizar comentario", type="primary"):
+    if not st.session_state.get("novum_autenticado"):
+        render_login()
         return
 
-    if not config["groq_key"]:
-        st.error("Falta la API key de Groq. Cargala en la barra lateral.")
-        return
-    if config["generar_iconos"] and not config["openai_key"]:
-        st.error("Falta la API key de OpenAI, o desactivá 'Generar íconos con IA'.")
-        return
-    if not comentario.strip():
-        st.warning("Escribí un comentario antes de analizar.")
-        return
-
-    with st.spinner("Analizando comentario..."):
-        respuesta, tiempo_respuesta, error = analizar_comentario(
-            config["groq_key"], config["modelo_texto"], config["temperatura"], comentario
-        )
-
-    if error:
-        st.error(error)
-        return
-
-    datos, sugerencias, contenido_invalido = parsear_sugerencias(respuesta)
-    if contenido_invalido is not None:
-        st.error("El modelo no devolvió un JSON válido. Probá de nuevo o cambiá el modelo.")
-        with st.expander("Ver respuesta cruda"):
-            st.code(contenido_invalido)
-        return
-
-    costo_texto = calcular_costo_texto(config["modelo_texto"], respuesta)
-    render_metricas_texto(tiempo_respuesta, respuesta, costo_texto)
-    st.divider()
-
-    cliente_imagen = OpenAI(api_key=config["openai_key"], timeout=60.0) if config["generar_iconos"] else None
-    costo_imagenes = render_sugerencias(
-        sugerencias, cliente_imagen, config["generar_iconos"], config["one_shot"]
-    )
-
-    if config["generar_iconos"]:
+    with st.sidebar:
+        st.caption(f"👤 Sesión: {st.session_state.get('novum_usuario', 'anonimo')}")
+        if st.button("Salir"):
+            st.session_state["novum_autenticado"] = False
+            st.rerun()
         st.divider()
-        costo_total = (costo_texto or 0) + costo_imagenes
-        st.metric("💰 Costo total de este análisis", f"US$ {costo_total:.5f}")
 
-    with st.expander("Ver JSON crudo"):
-        st.json(datos)
+    render_app()
 
 
 if __name__ == "__main__":
