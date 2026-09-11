@@ -172,7 +172,7 @@ ESTILO_BASE = (
 CONCEPTO_REFERENCIA = "un engranaje simple representando mejora continua"
 
 FONDO_PATH = "assets/banner.jpg"
-COLOR_TITULO = "#7A4A00"
+COLOR_TITULO = "#374151"
 
 
 @st.cache_data
@@ -191,12 +191,19 @@ def render_fondo():
         f"""
         <style>
         [data-testid="stMain"] {{
-            background-color: #FFDC00;
-            background-image: url("{fondo}");
-            background-size: contain;
-            background-repeat: no-repeat;
-            background-position: center;
-            background-attachment: fixed;
+            background-color: #C4C4C6;
+            background-image: linear-gradient(rgba(255,255,255,0.55), rgba(255,255,255,0.55)), url("{fondo}");
+            background-size: cover, contain;
+            background-repeat: no-repeat, no-repeat;
+            background-position: center, center;
+            background-attachment: fixed, fixed;
+        }}
+        @media (max-width: 640px) {{
+            [data-testid="stMain"] {{
+                background-size: cover, cover;
+                background-position: center, right center;
+                background-attachment: scroll, scroll;
+            }}
         }}
         [class*="st-key-novum_sugerencia_"] {{
             background: rgba(255, 255, 255, 0.65);
@@ -564,7 +571,7 @@ def render_gracias():
             font-family: 'Poppins', sans-serif;
             font-weight: 600;
             font-size: 1.5rem;
-            color: #7A4A00;
+            color: #374151;
             text-align: center;
             margin-bottom: 0.5rem;
         }
@@ -604,16 +611,18 @@ def render_gracias():
 
 
 def render_titulo_novum():
-    """Encabezado de marca (🔮 NOVUM + eslogan), reutilizado en cada vista."""
+    """Encabezado de marca (NOVUM + eslogan), reutilizado en cada vista."""
     st.markdown(
         f"""
         <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&display=swap" rel="stylesheet">
         <p style="font-family:'Poppins', sans-serif; font-weight:600;
-                  font-size:2rem; color:{COLOR_TITULO}; margin-bottom:0;">
-            🔮 NOVUM
+                  font-size:2rem; color:{COLOR_TITULO}; margin-bottom:0;
+                  text-align:center;">
+            NOVUM
         </p>
         <p style="font-family:'Poppins', sans-serif; font-size:0.95rem;
-                  color:{COLOR_TITULO}; opacity:0.85; margin-top:0.1rem;">
+                  color:{COLOR_TITULO}; opacity:0.85; margin-top:0.1rem;
+                  text-align:center;">
             Transformamos lo que pasa en oportunidades de mejora.
         </p>
         """,
@@ -663,15 +672,17 @@ def render_app():
         f"""
         <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&display=swap" rel="stylesheet">
         <p style="font-family:'Poppins', sans-serif; font-weight:500;
-                  font-size:1.05rem; color:{COLOR_TITULO}; margin-bottom:0.1rem;">
+                  font-size:1.05rem; color:{COLOR_TITULO}; margin-bottom:0.1rem;
+                  text-align:center;">
             Tu experiencia puede ayudarnos a mejorar. ¿Qué querés compartir hoy?
+        </p>
+        <p style="font-family:'Poppins', sans-serif; font-size:0.85rem;
+                  color:#4B5563; text-align:center; margin-top:0;">
+            Puede ser una idea, una observación, una dificultad, un riesgo o
+            una oportunidad de mejora.
         </p>
         """,
         unsafe_allow_html=True,
-    )
-    st.caption(
-        "Puede ser una idea, una observación, una dificultad, un riesgo o "
-        "una oportunidad de mejora."
     )
     comentario = st.text_area(
         "Comentario",
@@ -683,7 +694,11 @@ def render_app():
         ),
     )
 
-    if st.button("🔎 Analizar comentario", type="primary"):
+    col_izq, col_boton, col_der = st.columns([1, 1, 1])
+    with col_boton:
+        analizar_click = st.button("🔎 Analizar comentario", type="primary", use_container_width=True)
+
+    if analizar_click:
         if not config["groq_key"]:
             st.error("Falta la API key de Groq. Cargala en la barra lateral.")
         elif config["generar_iconos"] and not config["openai_key"]:
@@ -763,7 +778,7 @@ def render_app():
 
 
 def main():
-    st.set_page_config(page_title="NOVUM", page_icon="🔮", layout="centered")
+    st.set_page_config(page_title="NOVUM", page_icon="💡", layout="centered")
     render_fondo()
 
     if not st.session_state.get("novum_autenticado"):
