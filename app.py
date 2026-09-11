@@ -15,6 +15,7 @@ import truststore
 truststore.inject_into_ssl()
 
 import streamlit as st
+import streamlit.components.v1 as components
 from groq import Groq
 import groq
 from openai import OpenAI
@@ -549,24 +550,69 @@ def _texto_areas_involucradas(sugerencias):
     return "los equipos de " + ", ".join(areas[:-1]) + f" y {areas[-1]}"
 
 
+def mostrar_confeti():
+    """Explosión de confeti tipo cañón, desde el centro hacia todos lados,
+    con caída por gravedad. Reemplaza a st.balloons() porque en pantallas
+    chicas (mobile) los globos quedan muy apretados y suben demasiado
+    rápido para notarse.
+
+    El componente de Streamlit vive dentro de un iframe chico, así que el
+    canvas del confeti se agrega directamente al documento de la página
+    principal (el iframe de components.html comparte origen con la app,
+    así que window.parent.document es accesible) — si no, el efecto
+    quedaría encerrado en el recuadro del componente en vez de cubrir la
+    pantalla completa.
+    """
+    components.html(
+        """
+        <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js"></script>
+        <script>
+        (function () {
+            var colores = ['#5A4FCF', '#6D5DF6', '#5E8A96', '#F2A93B', '#E24B4A'];
+            var disparar = function (confettiFn) {
+                confettiFn({
+                    particleCount: 180,
+                    spread: 360,
+                    startVelocity: 45,
+                    gravity: 1,
+                    ticks: 220,
+                    origin: { x: 0.5, y: 0.5 },
+                    colors: colores,
+                });
+            };
+            try {
+                var doc = window.parent.document;
+                var canvas = doc.createElement('canvas');
+                canvas.style.position = 'fixed';
+                canvas.style.top = '0';
+                canvas.style.left = '0';
+                canvas.style.width = '100%';
+                canvas.style.height = '100%';
+                canvas.style.pointerEvents = 'none';
+                canvas.style.zIndex = '999999';
+                doc.body.appendChild(canvas);
+                var miConfeti = confetti.create(canvas, { resize: true, useWorker: true });
+                disparar(miConfeti);
+                setTimeout(function () {
+                    canvas.remove();
+                }, 4000);
+            } catch (e) {
+                disparar(confetti);
+            }
+        })();
+        </script>
+        """,
+        height=1,
+        width=1,
+    )
+
+
 def render_gracias():
     """Pantalla de agradecimiento tras enviar un comentario."""
     st.markdown(
         """
         <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&display=swap" rel="stylesheet">
         <style>
-        @keyframes novum-vuelo {
-            0%   { transform: translate(-50%, 60px) rotate(-10deg); opacity: 0; }
-            25%  { opacity: 1; }
-            100% { transform: translate(-50%, -140px) rotate(12deg); opacity: 0; }
-        }
-        .novum-avion {
-            position: relative;
-            left: 50%;
-            width: fit-content;
-            font-size: 3rem;
-            animation: novum-vuelo 1.8s ease-out forwards;
-        }
         .novum-gracias-titulo {
             font-family: 'Poppins', sans-serif;
             font-weight: 600;
@@ -584,11 +630,10 @@ def render_gracias():
             margin: 0.2rem 0;
         }
         </style>
-        <div class="novum-avion">✈️</div>
         """,
         unsafe_allow_html=True,
     )
-    st.balloons()
+    mostrar_confeti()
 
     texto_areas = _texto_areas_involucradas(st.session_state.get("novum_ultimas_sugerencias", []))
 
